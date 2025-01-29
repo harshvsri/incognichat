@@ -1,0 +1,18 @@
+[package]
+name = "incognichat"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "server"
+path = "./src/server.rs"
+
+[[bin]]
+name = "client"
+path = "./src/client.rs"
+
+[dependencies]
+chrono = "0.4.39"
+crossterm = "0.28.1"
+getrandom = "0.3.1"
+mio = "1.0.3"
