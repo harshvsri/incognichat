@@ -3,13 +3,23 @@ name = "incognichat"
 version = "0.1.0"
 edition = "2021"
 
+# Reference binaries start.
 [[bin]]
 name = "server"
-path = "./src/server.rs"
+path = "./src/ref/server.rs"
 
 [[bin]]
 name = "client"
-path = "./src/client.rs"
+path = "./src/ref/client.rs"
+# Reference binaries end.
+
+[[bin]]
+name = "backend"
+path = "./src/backend.rs"
+
+[[bin]]
+name = "frontend"
+path = "./src/frontend.rs"
 
 [dependencies]
 chrono = "0.4.39"

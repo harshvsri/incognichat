@@ -57,12 +57,12 @@ impl Sinner {
 
     fn strike(&mut self) -> bool {
         match self {
-            Self::Striked(x) => {
-                if *x >= STRIKE_LIMIT {
+            Self::Striked(strike_count) => {
+                if *strike_count >= STRIKE_LIMIT {
                     *self = Self::Banned(SystemTime::now());
                     true
                 } else {
-                    *x += 1;
+                    *strike_count += 1;
                     false
                 }
             }
@@ -86,7 +86,7 @@ impl Server {
         }
     }
 
-    fn client_connected(&mut self, mut author: TcpStream, author_addr: SocketAddr, token: Token) {
+    fn connect_client(&mut self, mut author: TcpStream, author_addr: SocketAddr, token: Token) {
         let now = SystemTime::now();
 
         if let Some(sinner) = self.sinners.get_mut(&author_addr.ip()) {
@@ -98,17 +98,17 @@ impl Server {
                     });
                     if diff < BAN_LIMIT {
                         let secs = (BAN_LIMIT - diff).as_secs_f32();
-                        // TODO: probably remove this logging, cause banned MFs may still keep connecting and overflow us with logs
-                        println!("INFO: Client {author_addr} tried to connected, but that MF is banned for {secs} secs", author_addr = Sens(author_addr));
-                        let _ = writeln!(author, "You are banned MF: {secs} secs left").map_err(
-                            |err| {
+
+                        // TODO: Probably remove this logging, cause banned MFs may still keep connecting and overflow us with logs.
+                        println!("INFO: Client {author_addr} tried to connected, but is banned for {secs} secs", author_addr = Sens(author_addr));
+                        let _ =
+                            writeln!(author, "You are banned: {secs} secs left").map_err(|err| {
                                 eprintln!(
                                     "ERROR: could not send banned message to {author_addr}: {err}",
                                     author_addr = Sens(author_addr),
                                     err = Sens(err)
                                 );
-                            },
-                        );
+                            });
                         let _ = author.shutdown(Shutdown::Both).map_err(|err| {
                             eprintln!(
                                 "ERROR: could not shutdown socket for {author_addr}: {err}",
@@ -141,21 +141,22 @@ impl Server {
         );
     }
 
-    fn client_read(&mut self, token: Token) {
+    fn read_client(&mut self, token: Token) {
         if let Some(author) = self.clients.get_mut(&token) {
             let author_addr: SocketAddr = author.addr.clone();
             let mut buffer = [0; 64];
             let bytes: Vec<_> = match author.conn.read(&mut buffer) {
                 Ok(0) => {
-                    // TODO: we need to distinguish between willful client disconnects and banned disconnects
-                    // Banned Sinners may try to use this to fill up all the space on the hard drive
+                    // TODO: We need to distinguish between willful client disconnects and banned disconnects,
+                    // banned Sinners may try to use this to fill up all the space on the hard drive.
+
                     println!(
                         "INFO: Client {author_addr} disconnected",
                         author_addr = Sens(author_addr)
                     );
-                    // TODO: if the disconnected client was not authorized we may probably want to strike their
-                    // IP, because they are probably constantly connecting/disconnecting trying to evade the
-                    // strike.
+                    // TODO: If the disconnected client was not authorized we may probably want to strike their IP,
+                    // because they are probably constantly connecting/disconnecting trying to evade the strike.
+
                     self.clients.remove(&token);
                     return;
                 }
@@ -200,13 +201,15 @@ impl Server {
                 for (client_token, client) in self.clients.iter_mut() {
                     if *client_token != token && client.authed {
                         let _ = writeln!(client.conn, "{text}").map_err(|err| {
-                            eprintln!("ERROR: could not broadcast message to all the clients from {author_addr}: {err}", author_addr = Sens(author_addr), err = Sens(err))
+                            eprintln!("ERROR: could not broadcast message to all the clients from {author_addr}: {err}",
+                                author_addr = Sens(author_addr),
+                                err = Sens(err))
                         });
                     }
                 }
             } else {
                 if text != self.token {
-                    // TODO: let the user know that they were banned after this attempt
+                    // TODO: Let the user know that they were banned after this attempt.
                     println!("INFO: {} failed authorization!", Sens(author_addr));
                     let _ = writeln!(author.conn, "Invalid token! Bruh!").map_err(|err| {
                         eprintln!(
@@ -223,8 +226,7 @@ impl Server {
                         );
                     });
                     self.clients.remove(&token);
-                    // TODO: each IP strike must be properly documented in the source code giving the reasoning
-                    // behind it.
+                    // TODO: Each IP strike must be properly documented in the source code giving the reasoning behind it.
                     self.strike_ip(author_addr.ip());
                     return;
                 }
@@ -271,9 +273,9 @@ impl Server {
     }
 
     fn update(&mut self, token: Token) {
-        self.client_read(token);
+        self.read_client(token);
 
-        // TODO: keep waiting connections in a separate hash map
+        // TODO: Keep waiting connections in a separate hashmap.
         self.clients.retain(|_, client| {
             let addr: SocketAddr = client.addr.clone();
             if !client.authed {
@@ -283,7 +285,8 @@ impl Server {
                     SLOWLORIS_LIMIT
                 });
                 if diff >= SLOWLORIS_LIMIT {
-                    // TODO: disconnect everyone from addr.ip()
+
+                    // TODO: Disconnect everyone from addr.ip().
                     self.sinners.entry(addr.ip()).or_insert(Sinner::new()).strike();
                     let _ = client.conn.shutdown(Shutdown::Both).map_err(|err| {
                         eprintln!("ERROR: could not shutdown socket for {addr}: {err}", addr = Sens(addr), err = Sens(err));
@@ -358,7 +361,7 @@ fn main() -> Result<()> {
                             let token = Token(counter);
 
                             match poll.registry().register(&mut stream, token, Interest::READABLE) {
-                                Ok(_) => server.client_connected(stream, author_addr, token),
+                                Ok(_) => server.connect_client(stream, author_addr, token),
                                 Err(err) => eprintln!("ERROR: could not register client socket in the Poll object: {err}"),
                             }
                         }

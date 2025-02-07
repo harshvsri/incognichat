@@ -6,23 +6,40 @@ use crossterm::{
     QueueableCommand,
 };
 use std::{
-    io::{self, stdout, Write},
+    error::Error,
+    io::{stdout, Read, Write},
+    net::TcpStream,
     thread,
     time::Duration,
 };
+
+const ADDRESS: &str = "127.0.0.1:3000";
 
 struct Message {
     time: String,
     content: String,
 }
 
-fn main() -> io::Result<()> {
+impl Message {
+    fn new(content: String) -> Self {
+        Message {
+            time: Local::now().format("%H:%M").to_string(),
+            content,
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
     // Enable raw mode for better control over the terminal
     terminal::enable_raw_mode()?;
+    let mut stream = TcpStream::connect(ADDRESS)?;
+    stream.set_nonblocking(true)?;
 
     let mut stdout = stdout();
     let (mut width, mut height) = terminal::size().unwrap();
+
     let mut messages = Vec::new();
+    messages.push(Message::new("Connected to server".to_string()));
     let mut prompt = String::new();
 
     let mut quit = false;
@@ -42,6 +59,8 @@ fn main() -> io::Result<()> {
                                 content: prompt.clone(),
                             };
                             messages.push(msg);
+                            let bytes_written = stream.write(prompt.as_bytes())?;
+                            println!("Bytes written: {}", bytes_written);
                             prompt.clear();
                         }
                     }
@@ -64,6 +83,16 @@ fn main() -> io::Result<()> {
                     _ => {}
                 },
                 _ => {}
+            }
+        }
+
+        //Listening for peer messages.
+        let mut buf = vec![0; 1024];
+
+        if let Ok(bytes_read) = stream.read(&mut buf) {
+            if bytes_read != 0 {
+                let peer_msg = String::from_utf8(buf[..bytes_read].to_vec()).unwrap();
+                messages.push(Message::new(peer_msg));
             }
         }
 
@@ -104,6 +133,7 @@ fn main() -> io::Result<()> {
 
         stdout.flush()?;
 
+        // Ensures 30FPS
         thread::sleep(Duration::from_millis(33));
     }
 
