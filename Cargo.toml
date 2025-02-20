@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "backend"
-path = "./src/backend.rs"
+name = "server"
+path = "./src/server.rs"
 
 [[bin]]
-name = "frontend"
-path = "./src/frontend.rs"
+name = "client"
+path = "./src/client.rs"
 
 [dependencies]
 chrono = "0.4.39"
 crossterm = "0.28.1"
+smol = "2.0.2"
