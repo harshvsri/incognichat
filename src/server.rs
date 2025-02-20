@@ -28,6 +28,7 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
 struct Client {
     addr: SocketAddr,
     stream: TcpStream,
@@ -36,6 +37,57 @@ struct Client {
 impl Client {
     fn new(addr: SocketAddr, stream: TcpStream) -> Self {
         Client { addr, stream }
+    }
+
+    async fn broadcast(&self, conn_clients: Arc<Mutex<Vec<Client>>>, msg: &[u8]) {
+        let curr_addr = self.addr;
+        let mut clients = conn_clients.lock().await;
+
+        for client in clients.iter_mut() {
+            if client.addr != curr_addr {
+                let _bytes_written = client.stream.write(msg).await.unwrap_or_default();
+            }
+        }
+    }
+
+    async fn handle_connection(&mut self, conn_clients: Arc<Mutex<Vec<Client>>>) -> Result<()> {
+        let conn_msg = format!("{} @ {}", Msg::ClientConnected, self.addr);
+        println!("{}", style(&conn_msg).with(Color::Green));
+
+        let clients = conn_clients.clone();
+        self.broadcast(clients, conn_msg.as_bytes()).await;
+
+        let mut buf = vec![0; 1024];
+
+        loop {
+            let bytes_read = self.stream.read(&mut buf).await.map_err(|err| {
+                eprintln!(
+                    "ERROR: could not read message from client: {}",
+                    Sesitive(err)
+                )
+            })?;
+
+            let clients = conn_clients.clone();
+            if bytes_read == 0 {
+                let disconn_msg = format!("{} @ {}", Msg::ClientDisconnected, self.addr);
+                println!("{}", style(&disconn_msg).with(Color::Red));
+
+                self.broadcast(clients, disconn_msg.as_bytes()).await;
+
+                // Remove this client.
+                conn_clients
+                    .lock()
+                    .await
+                    .retain(|client| client.addr != self.addr);
+                break;
+            } else {
+                let msg = buf[..bytes_read].to_vec();
+                println!("{}", Msg::Message(msg.clone()));
+
+                self.broadcast(clients, &msg).await;
+            };
+        }
+        Ok(())
     }
 }
 
@@ -58,47 +110,6 @@ impl Display for Msg {
     }
 }
 
-async fn handle_client(mut stream: TcpStream, conn_clients: Arc<Mutex<Vec<Client>>>) -> Result<()> {
-    let mut buf = vec![0; 1024];
-
-    loop {
-        let bytes_read = stream.read(&mut buf).await.map_err(|err| {
-            eprintln!(
-                "ERROR: could not read message from client: {}",
-                Sesitive(err)
-            )
-        })?;
-
-        if bytes_read == 0 {
-            println!(
-                "{}",
-                style(format!("{}", Msg::ClientDisconnected)).with(Color::Red)
-            );
-
-            // Remove this client.
-            let addr = stream.peer_addr().unwrap();
-            conn_clients
-                .lock()
-                .await
-                .retain(|client| client.addr != addr);
-            break;
-        } else {
-            let msg = buf[..bytes_read].to_vec();
-            println!("{}", Msg::Message(msg.clone()));
-
-            // Broadcast to all the fellow clients.
-            let mut clients = conn_clients.lock().await;
-
-            for client in clients.iter_mut() {
-                if stream.peer_addr().unwrap() != client.addr {
-                    let _bytes_written = client.stream.write(&msg).await.unwrap_or_default();
-                }
-            }
-        };
-    }
-    Ok(())
-}
-
 fn main() -> Result<()> {
     smol::block_on(async {
         let listener = TcpListener::bind(ADDRESS)
@@ -107,23 +118,16 @@ fn main() -> Result<()> {
         println!("SERVER: listening at {addr}", addr = Sesitive(ADDRESS));
 
         let clients = Arc::new(Mutex::new(Vec::new()));
-        //let exe = Executor::new();
+
         while let Some(stream) = listener.incoming().next().await {
             match stream {
                 Ok(stream) => {
-                    let addr = stream.peer_addr().unwrap();
-                    {
-                        let mut clients = clients.lock().await; // Acquire the lock
-                        clients.push(Client::new(addr, stream.clone())); // Update shared state
-                    }
-
-                    println!(
-                        "{}",
-                        style(format!("{} @ {}", Msg::ClientConnected, addr)).with(Color::Green)
-                    );
+                    let mut client = Client::new(stream.peer_addr().unwrap(), stream.clone());
+                    clients.lock().await.push(client.clone()); // Acquire the lock
 
                     let clients_clone = clients.clone();
-                    smol::spawn(handle_client(stream, clients_clone)).detach();
+                    smol::spawn(async move { client.handle_connection(clients_clone).await })
+                        .detach();
                 }
 
                 Err(err) => {
