@@ -1,16 +1,18 @@
 use chrono::Local;
 use crossterm::{
     cursor,
-    event::{poll, read, Event, KeyCode, KeyModifiers},
+    event::{Event, KeyCode, KeyModifiers},
     terminal::{self, ClearType},
     QueueableCommand,
 };
+use smol::{
+    channel::Sender,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 use std::{
     error::Error,
-    io::{stdout, Read, Write},
-    net::TcpStream,
-    thread,
-    time::Duration,
+    io::{stdout, Stdout, Write},
 };
 
 const ADDRESS: &str = "127.0.0.1:3000";
@@ -29,119 +31,179 @@ impl Message {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    // Enable raw mode for better control over the terminal
-    terminal::enable_raw_mode()?;
-    let mut stream = TcpStream::connect(ADDRESS)?;
-    stream.set_nonblocking(true)?;
+enum AppEvent {
+    Crossterm(Event),
+    Network(String),
+    NetworkError(String),
+    InputError(String),
+}
 
-    let mut stdout = stdout();
-    let (mut width, mut height) = terminal::size().unwrap();
-
-    let mut messages = Vec::new();
-    messages.push(Message::new("Connected to server".to_string()));
-    let mut prompt = String::new();
-
-    let mut quit = false;
-    while !quit {
-        while poll(Duration::ZERO)? {
-            match read()? {
-                Event::Resize(new_width, new_height) => {
-                    width = new_width;
-                    height = new_height;
+async fn stream_handler(mut stream: TcpStream, sender: Sender<AppEvent>) {
+    let mut buf = vec![0; 1024];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(bytes_read) => {
+                if bytes_read == 0 {
+                    let _ = sender
+                        .send(AppEvent::NetworkError(
+                            "Connection closed by server".to_string(),
+                        ))
+                        .await;
+                    break;
                 }
-
-                Event::Key(event) => match event.code {
-                    KeyCode::Enter => {
-                        if !prompt.is_empty() {
-                            let msg = Message {
-                                time: Local::now().format("%H:%M").to_string(),
-                                content: prompt.clone(),
-                            };
-                            messages.push(msg);
-                            let bytes_written = stream.write(prompt.as_bytes())?;
-                            println!("Bytes written: {}", bytes_written);
-                            prompt.clear();
-                        }
-                    }
-
-                    KeyCode::Backspace => {
-                        prompt.pop();
-                    }
-
-                    KeyCode::Left => {
-                        cursor::MoveLeft(1);
-                    }
-
-                    KeyCode::Char(ch) => {
-                        if ch == 'c' && event.modifiers.contains(KeyModifiers::CONTROL) {
-                            quit = true;
-                        } else {
-                            prompt.push(ch);
-                        }
-                    }
-                    _ => {}
-                },
-                _ => {}
+                let msg = String::from_utf8_lossy(&buf[..bytes_read]).to_string();
+                let _ = sender.send(AppEvent::Network(msg)).await;
+            }
+            Err(e) => {
+                let _ = sender
+                    .send(AppEvent::NetworkError(format!("Read error: {}", e)))
+                    .await;
+                break;
             }
         }
+    }
+}
 
-        //Listening for peer messages.
-        let mut buf = vec![0; 1024];
-
-        if let Ok(bytes_read) = stream.read(&mut buf) {
-            if bytes_read != 0 {
-                let peer_msg = String::from_utf8(buf[..bytes_read].to_vec()).unwrap();
-                messages.push(Message::new(peer_msg));
+async fn input_handler(sender: Sender<AppEvent>) {
+    loop {
+        match smol::unblock(crossterm::event::read).await {
+            Ok(event) => {
+                let _ = sender.send(AppEvent::Crossterm(event)).await;
+            }
+            Err(e) => {
+                let _ = sender
+                    .send(AppEvent::InputError(format!("Input error: {}", e)))
+                    .await;
+                break;
             }
         }
+    }
+}
 
-        // Clear the terminal
-        stdout.queue(terminal::Clear(ClearType::All))?;
+fn render(
+    stdout: &mut Stdout,
+    (width, height): (u16, u16),
+    (messages, prompt): (&[Message], &str),
+) -> Result<(), Box<dyn Error>> {
+    stdout.queue(terminal::Clear(ClearType::All))?;
 
-        let skip_count = if messages.len() <= (height - 2) as usize {
-            0
-        } else {
-            messages.len() - ((height - 2) as usize)
-        };
-        // Render the chat
-        for (row, message) in messages.iter().skip(skip_count).enumerate() {
-            let msg = format!("[{}] {}", message.time, message.content);
-            let max_len = if msg.len() <= width as usize {
-                msg.len()
-            } else {
-                width as usize
-            };
+    let skip_count = if messages.len() <= (height - 2) as usize {
+        0
+    } else {
+        messages.len() - ((height - 2) as usize)
+    };
 
-            stdout
-                .queue(cursor::MoveTo(0, row as u16))?
-                .write(msg[..max_len].as_bytes())?;
-        }
-
+    for (row, message) in messages.iter().skip(skip_count).enumerate() {
+        let msg = format!("[{}] {}", message.time, message.content);
+        let max_len = msg.len().min(width as usize);
         stdout
-            .queue(cursor::MoveTo(0, height - 2))?
-            .write(get_border(width).as_bytes())?;
-
-        let min_len = if prompt.len() <= width as usize {
-            0
-        } else {
-            prompt.len() - width as usize + 1
-        };
-        stdout
-            .queue(cursor::MoveTo(0, height - 1))?
-            .write(prompt[min_len..].as_bytes())?;
-
-        stdout.flush()?;
-
-        // Ensures 30FPS
-        thread::sleep(Duration::from_millis(33));
+            .queue(cursor::MoveTo(0, row as u16))?
+            .write_all(msg[..max_len].as_bytes())?;
     }
 
-    // Disable raw mode before exiting
-    terminal::disable_raw_mode()?;
+    stdout
+        .queue(cursor::MoveTo(0, height - 2))?
+        .write_all("─".repeat(width as usize).as_bytes())?;
+
+    stdout
+        .queue(cursor::MoveTo(0, height - 1))?
+        .write_all(">>".as_bytes())?;
+
+    let min_len = if prompt.len() <= width as usize {
+        0
+    } else {
+        prompt.len() - width as usize + 1
+    };
+    stdout
+        .queue(cursor::MoveTo(3, height - 1))?
+        .write_all(prompt[min_len..].as_bytes())?;
+
+    stdout.flush()?;
     Ok(())
 }
 
-fn get_border(width: u16) -> String {
-    "─".repeat(width as usize)
+fn main() -> Result<(), Box<dyn Error>> {
+    smol::block_on(async {
+        let mut stream = TcpStream::connect(ADDRESS).await.inspect_err(|err| {
+            eprintln!("ERROR: could not bind {ADDRESS}: {}", err);
+            eprintln!("WARN: ensure that the server is running.");
+        })?;
+        let (sender, receiver) = smol::channel::unbounded::<AppEvent>();
+
+        let read_stream = stream.clone();
+        let io_sender = sender.clone();
+        smol::spawn(async move {
+            stream_handler(read_stream, io_sender).await;
+        })
+        .detach();
+
+        smol::spawn(async move {
+            let _ = input_handler(sender).await;
+        })
+        .detach();
+
+        // Terminal UI Startup
+        terminal::enable_raw_mode()?;
+        let mut stdout = stdout();
+        stdout.queue(terminal::Clear(ClearType::All))?.flush()?;
+
+        let (mut width, mut height) = terminal::size()?;
+        let (mut messages, mut prompt) = (Vec::new(), String::new());
+        messages.push(Message::new("Connected to server".to_string()));
+        render(&mut stdout, (width, height), (&messages, &prompt))?;
+
+        loop {
+            if let Ok(event) = receiver.recv().await {
+                match event {
+                    AppEvent::Network(msg) => {
+                        messages.push(Message::new(msg));
+                    }
+                    AppEvent::NetworkError(err) => {
+                        messages.push(Message::new(format!("Network error: {}", err)));
+                        break;
+                    }
+                    AppEvent::InputError(err) => {
+                        messages.push(Message::new(format!("Input error: {}", err)));
+                        break;
+                    }
+                    AppEvent::Crossterm(event) => match event {
+                        Event::Resize(new_width, new_height) => {
+                            width = new_width;
+                            height = new_height;
+                        }
+                        Event::Key(key_event) => match key_event.code {
+                            KeyCode::Enter => {
+                                if !prompt.is_empty() {
+                                    stream.write_all(prompt.as_bytes()).await?;
+                                    messages.push(Message::new(prompt.clone()));
+                                    prompt.clear();
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                prompt.pop();
+                            }
+                            KeyCode::Char(ch) => {
+                                if ch == 'c' && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                                {
+                                    break;
+                                }
+                                prompt.push(ch);
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    },
+                }
+                render(&mut stdout, (width, height), (&messages, &prompt))?;
+            }
+        }
+
+        // Terminal UI Cleanup.
+        stdout
+            .queue(terminal::Clear(ClearType::All))?
+            .queue(cursor::MoveTo(0, 0))?
+            .flush()?;
+        terminal::disable_raw_mode()?;
+        Ok(())
+    })
 }
