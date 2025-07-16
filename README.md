@@ -17,6 +17,35 @@ Incognichat is a secure and anonymous chat application designed for private, ide
 3. **Start Chatting**: Exchange messages without revealing your identity.
 4. **Leave No Trace**: Messages and connections are securely discarded after the session.
 
+### Architecture Details
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Main Task     │    │ Stream Handler  │    │ Input Handler   │
+│   (UI + Logic)  │    │   (Network)     │    │   (Keyboard)    │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         └───────────────────────┼───────────────────────┘
+                                 │
+                       ┌─────────────────┐
+                       │  Event Channel  │
+                       │   (Unbounded)   │
+                       └─────────────────┘
+
+
+Keyboard ──┐
+           │
+           ▼
+    ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+    │Input Handler│────▶ │   Channel   │────▶ │ Main Task   │
+    └─────────────┘      └─────────────┘      └─────────────┘
+                                ▲                     │
+                                │                     │
+    ┌──────────────┐            │                     ▼
+    │Stream Handler│────────────┘              ┌─────────────┐
+    └──────────────┘                           │   Render    │
+           ▲                                   └─────────────┘
+           │                                         │
+    Network Socket                                   ▼
+                                              Terminal Screen
 ## Use Cases
 
 - Anonymous discussions.
